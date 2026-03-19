@@ -18,17 +18,18 @@ FROM python:3.11-slim
 # Set working directory
 WORKDIR /app
 
-# Copy Python dependencies from builder
-COPY --from=builder /root/.local /root/.local
-
-# Copy application code
-COPY entsodata/ entsodata/
-
-# Make sure scripts in .local are usable
-ENV PATH=/root/.local/bin:$PATH
-
 # Create non-root user
 RUN useradd -m -u 1000 proxyuser && chown -R proxyuser:proxyuser /app
+
+# Copy Python dependencies from builder
+COPY --chown=proxyuser:proxyuser --from=builder /root/.local /home/proxyuser/.local
+
+# Copy application code
+COPY --chown=proxyuser:proxyuser entsodata/ entsodata/
+
+# Make sure scripts in .local are usable
+ENV PATH=/home/proxyuser/.local/bin:$PATH
+
 USER proxyuser
 
 # Expose port
