@@ -89,6 +89,21 @@ spec:
       restartPolicy: Always
       terminationGracePeriodSeconds: 30
 ---
+apiVersion: v1
+kind: Service
+metadata:
+  name: entsodata
+  namespace: entsodata
+  labels:
+    app: entsodata
+spec:
+  type: ClusterIP
+  ports:
+    - port: 8080
+      targetPort: 8080
+  selector:
+    app: entsodata
+---
 apiVersion: cert-manager.io/v1
 kind: Certificate
 metadata:
@@ -119,5 +134,5 @@ spec:
       middlewares:
         - name: headers-default@file
       services:
-        - name: entsodata-service
-          port: 80
+        - name: entsodata
+          port: 8080

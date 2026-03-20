@@ -112,12 +112,11 @@ def format_date_for_entsoe(date: datetime) -> str:
     return utc_date.strftime('%Y%m%d%H%M')
 
 
-def parse_xml_response(xml_string: str) -> List[Dict]:
+def parse_xml_response(xml_string: str, tz: zoneinfo.ZoneInfo, target_date: datetime) -> List[Dict]:
     """Parse ENTSO-E XML response and extract hourly prices with quarter detail.
 
     Handles both PT60M (hourly) and PT15M (quarter-hourly) resolutions.
-    For PT15M data, groups 4 quarter-hourly points into each hour with an
-    averaged hourly price and a nested 'quarters' list.
+    Uses absolute timestamps from the XML to avoid position overwrites across periods.
     """
     try:
         root = ET.fromstring(xml_string)
@@ -138,9 +137,8 @@ def parse_xml_response(xml_string: str) -> List[Dict]:
         logger.error(f"ENTSO-E API error: {error_msg}")
         raise ValueError(f"ENTSO-E API error: {error_msg}")
 
-    # Collect all points across all TimeSeries/Period blocks
-    # Points keyed by position (1-based) to handle overlapping series
-    all_points = {}  # position -> price_eur_mwh
+    # Collect all points using (hour, quarter) as keys
+    all_points = {}
     resolution = 'PT60M'
 
     for ts in root.findall(f'.//{ns}TimeSeries'):
@@ -148,6 +146,21 @@ def parse_xml_response(xml_string: str) -> List[Dict]:
             res_el = period.find(f'{ns}resolution')
             if res_el is not None and res_el.text:
                 resolution = res_el.text.strip()
+            
+            interval_start_el = period.find(f'.//{ns}timeInterval/{ns}start')
+            if interval_start_el is None or not interval_start_el.text:
+                continue
+                
+            start_str = interval_start_el.text.replace('Z', '+00:00')
+            try:
+                period_start = datetime.fromisoformat(start_str)
+            except ValueError:
+                continue
+
+            if resolution == 'PT15M':
+                delta = timedelta(minutes=15)
+            else:
+                delta = timedelta(minutes=60)
 
             for point in period.findall(f'{ns}Point'):
                 pos_el = point.find(f'{ns}position')
@@ -156,24 +169,34 @@ def parse_xml_response(xml_string: str) -> List[Dict]:
                     continue
                 position = int(pos_el.text)
                 price_eur_mwh = float(price_el.text)
-                all_points[position] = price_eur_mwh
+                
+                point_start_utc = period_start + (position - 1) * delta
+                point_local = point_start_utc.astimezone(tz)
+                
+                # Filter for the target date
+                if point_local.date() == target_date.date():
+                    hour = point_local.hour
+                    minute = point_local.minute
+                    if resolution == 'PT15M':
+                        q = minute // 15
+                        all_points[(hour, q)] = price_eur_mwh
+                    else:
+                        all_points[(hour, 0)] = price_eur_mwh
 
     if not all_points:
         logger.error("No price points found in XML response")
         raise ValueError("No price data found in response")
 
-    logger.info(f"Parsed {len(all_points)} points with resolution {resolution}")
+    logger.info(f"Parsed {len(all_points)} valid points with resolution {resolution} for target date")
 
     prices = []
 
     if resolution == 'PT15M':
-        # Group 96 quarter-hourly points into 24 hours
         for hour in range(24):
             quarter_prices = []
             for q in range(4):
-                pos = hour * 4 + q + 1  # 1-based position
-                if pos in all_points:
-                    quarter_prices.append(round(all_points[pos] / 10, 4))
+                if (hour, q) in all_points:
+                    quarter_prices.append(round(all_points[(hour, q)] / 10, 4))
                 else:
                     quarter_prices.append(None)
 
@@ -189,16 +212,14 @@ def parse_xml_response(xml_string: str) -> List[Dict]:
                 ]
             })
     else:
-        # PT60M — hourly data
-        sorted_positions = sorted(all_points.keys())
-        for pos in sorted_positions:
-            hour = pos - 1
-            price_cents_kwh = round(all_points[pos] / 10, 2)
-            prices.append({
-                'hour': hour,
-                'price': price_cents_kwh,
-                'quarters': []
-            })
+        for hour in range(24):
+            if (hour, 0) in all_points:
+                price_cents_kwh = round(all_points[(hour, 0)] / 10, 2)
+                prices.append({
+                    'hour': hour,
+                    'price': price_cents_kwh,
+                    'quarters': []
+                })
 
     prices.sort(key=lambda x: x['hour'])
 
@@ -245,7 +266,7 @@ def fetch_from_entsoe(bidding_zone: str, date: datetime) -> List[Dict]:
     try:
         response = requests.get(ENTSOE_API_URL, params=params, timeout=10)
         response.raise_for_status()
-        prices = parse_xml_response(response.text)
+        prices = parse_xml_response(response.text, tz, date)
         logger.info(f"Successfully fetched {len(prices)} prices for {bidding_zone}")
         return prices
         
