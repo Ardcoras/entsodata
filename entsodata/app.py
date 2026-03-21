@@ -162,14 +162,41 @@ def parse_xml_response(xml_string: str, tz: zoneinfo.ZoneInfo, target_date: date
             else:
                 delta = timedelta(minutes=60)
 
+            # First, extract all provided points into a dictionary for forward-filling
+            period_points = {}
             for point in period.findall(f'{ns}Point'):
                 pos_el = point.find(f'{ns}position')
                 price_el = point.find(f'{ns}price.amount')
-                if pos_el is None or price_el is None:
-                    continue
-                position = int(pos_el.text)
-                price_eur_mwh = float(price_el.text)
+                if pos_el is not None and price_el is not None:
+                    period_points[int(pos_el.text)] = float(price_el.text)
+            
+            if not period_points:
+                continue
                 
+            # Determine expected number of positions from start and end times
+            interval_end_el = period.find(f'.//{ns}timeInterval/{ns}end')
+            expected_positions = 0
+            if interval_end_el is not None and interval_end_el.text:
+                end_str = interval_end_el.text.replace('Z', '+00:00')
+                try:
+                    p_end = datetime.fromisoformat(end_str)
+                    expected_positions = int((p_end - period_start) / delta)
+                except ValueError:
+                    pass
+            
+            if expected_positions == 0:
+                expected_positions = max(period_points.keys())
+                
+            last_price = None
+            
+            # Forward-fill missing positions (some markets omit duplicate consecutive prices)
+            for position in range(1, expected_positions + 1):
+                if position in period_points:
+                    last_price = period_points[position]
+                
+                if last_price is None:
+                    continue  # Should not happen as position 1 is usually provided
+                    
                 point_start_utc = period_start + (position - 1) * delta
                 point_local = point_start_utc.astimezone(tz)
                 
@@ -179,9 +206,9 @@ def parse_xml_response(xml_string: str, tz: zoneinfo.ZoneInfo, target_date: date
                     minute = point_local.minute
                     if resolution == 'PT15M':
                         q = minute // 15
-                        all_points[(hour, q)] = price_eur_mwh
+                        all_points[(hour, q)] = last_price
                     else:
-                        all_points[(hour, 0)] = price_eur_mwh
+                        all_points[(hour, 0)] = last_price
 
     if not all_points:
         logger.error("No price points found in XML response")
